@@ -1,5 +1,12 @@
 library(tidyverse)
 
+# ISSUES TO FIX
+# - Use 3m bond as RF asset (need to convert it to monthly)
+# - After this we can use log returns for everything
+# - In the paper they use as value to bonds the 5y change in yields,
+# which is similar to the negative of the past 5y return
+# - Try removing FX effect
+
 ##### RData Conversion #####
 source("R/RData_rds.R")
 
@@ -31,30 +38,31 @@ source("R/fx_px.R")
 # Sell price of a 10y bond at t+1: there are 10y-1m to maturity, then, to
 # interpolate the yield in t+1 of this 10y-1m bond, we can compute
 # YTM_9y,t+1 + (11/12) * (YTM_10y,t+1 - YTM_9y,t+1) =: YTM_10y-1m,t+1
+# For 3m we just divide the YTM by 4 and take (1/3) of it, to represent
+# our risk-free rate
 
 # Compute bond prices in USD, save rds
 readr::read_rds("Data/BondData.rds") |> # Open rds
-  dplyr::filter(maturity == "10Y" | maturity == "09Y") |>  # Filter 10y and 9y bonds
-  # dplyr::mutate(symbol = sub(pattern = " Index", replacement = "", x = symbol), 
-  #               # Get rid of the word Index in the symbol column 
-  #               symbol = substr(symbol, 5, 7), # Keep only the maturity
-  #               symbol = paste(symbol, country, sep = " ")) |> # Merge ticker and 
-  # country in one column
+  dplyr::filter(maturity == "10Y" | 
+                  maturity == "09Y" |
+                  maturity == "03M") |>  # Filter 10y, 9y and 3m bonds
   collapse_panel(symbol, date) |> # Convert to monthly data
   dplyr::select(-symbol) |> 
   tidyr::pivot_wider(names_from = maturity, values_from = PX_MID) |> 
-  dplyr::mutate(`9Y11M` = `09Y` + (11/12) * (`10Y` - `09Y`),
-                px_10y  = 100 / (1 + `10Y`)^10,
-                px_9y11m   = 100 / (1 + `9Y11M`)^(9 + 11/12)) |> 
+  dplyr::mutate(`9Y11M`    = `09Y` + (11/12) * (`10Y` - `09Y`), # Interpolation
+                px_10y     = 100 / (1 + `10Y`)^10,
+                px_9y11m   = 100 / (1 + `9Y11M`)^(9 + 11/12)) |> # Px for interpolation
   dplyr::select(-`09Y`) |> 
   dplyr::left_join(fx, by = c("date","country")) |> # Left join with FX data
-  dplyr::mutate(px_10y   = fx.rates * px_10y,
+  dplyr::mutate(px_10y   = fx.rates * px_10y,     # Dollarize prices
                 px_9y11m = fx.rates * px_9y11m) |> 
   dplyr::select(-c(fx.rates, CRNCY)) |> 
   dplyr::group_by(country) |> 
-  dplyr::mutate(b_ret = (px_9y11m / dplyr::lag(px_10y)) - 1) |> 
-  dplyr::mutate(b_cum_ret  = dplyr::lag(slider::slide_dbl(.x = b_ret + 1,
-                                                          .f = ~prod(.x),
+  # dplyr::mutate(b_ret  = (px_9y11m / dplyr::lag(px_10y)) - 1) |> 
+  dplyr::mutate(b_ret  = log(px_9y11m / dplyr::lag(px_10y)),
+                rf_ret = (1 + `03M` / 4)^(1 / 3) - 1) |> 
+  dplyr::mutate(b_cum_ret  = dplyr::lag(slider::slide_dbl(.x = b_ret,
+                                                          .f = ~sum(.x),
                                                           .before = 10,
                                                           .complete = T))) |>
   dplyr::ungroup() |> 
@@ -103,9 +111,9 @@ readr::read_rds("Data/CPI.rds") |>
 
 
 ##### French Data Treatment #####
-source("R/RData_rds.R")
+# source("R/RData_rds.R")
 
-RData_rds(.rdata = "fama_french.RData", .rds = "fama_french.rds")  
+# RData_rds(.rdata = "fama_french.RData", .rds = "fama_french.rds")  
 
 # Adjust Fama-French RF factor to percentage and isolate it
 readr::read_rds("Data/fama_french.rds") |> 
@@ -140,9 +148,9 @@ readr::read_rds("Data/inds.rds") |>
   dplyr::mutate(PX_LAST = fx.rates * PX_LAST) |> 
   dplyr::group_by(ticker) |> 
   dplyr::arrange(date) |> 
-  dplyr::mutate(st_ret = PX_LAST / dplyr::lag(PX_LAST) - 1, 
-                st_cum_ret = dplyr::lag(slider::slide_dbl(.x = st_ret + 1,
-                                                          .f = ~prod(.x), 
+  dplyr::mutate(st_ret = log(PX_LAST / dplyr::lag(PX_LAST)), 
+                st_cum_ret = dplyr::lag(slider::slide_dbl(.x = st_ret,
+                                                          .f = ~sum(.x), 
                                                           .before = 10,
                                                           .complete = T))) |> 
   dplyr::ungroup() |>
@@ -177,9 +185,11 @@ readr::read_rds("Data/stock_bonds_ff.rds") |>
 
 ##### Compute B/P Ratio #####
 readr::read_rds("Data/measures_data.rds") |> 
-  dplyr::mutate(b_value  = `10Y` - cpi_rt,
+  dplyr::group_by(country) |> 
+  dplyr::mutate(b_value  = `10Y` - dplyr::lag(`10Y`, n = 60), #`10Y` - cpi_rt,
                 st_value = ifelse(!is.na(PX_LAST), log(1 / pb), NA)) |> 
   dplyr::arrange(date) |> 
+  dplyr::ungroup() |> 
   readr::write_rds("Data/all_data.rds")
 
 
